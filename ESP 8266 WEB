@@ -1,0 +1,344 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <HX711_ADC.h>
+
+// ===== LOAD CELL =====
+HX711_ADC LoadCell(D3, D4);
+
+// ===== RPM SENSOR =====
+#define RPM_PIN D2
+volatile int pulseCount = 0;
+unsigned long lastRPMTime = 0;
+float rpm = 0;
+
+// ===== WIFI =====
+const char* ssid = "PC integrated lab";
+const char* password = "12345678";
+
+ESP8266WebServer server(80);
+
+// ===== MOTOR =====
+#define mot_rly D7
+#define mot_A D5
+#define mot_B D6
+
+// ===== VARIABLES =====
+float V=0,I=0,T=0,loadValue=0;
+String motor_stat="STOPPED";
+String data_in;
+
+int stepsPerRotation = 7;
+
+// ===== RPM INTERRUPT =====
+void IRAM_ATTR countPulse(){
+  pulseCount++;
+}
+
+// ================= WEB PAGE =================
+String webpage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC INTEGRATED INDUCTION MOTOR</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+
+<style>
+body{background:#0b1220;color:white;font-family:Arial;text-align:center;}
+
+.grid{
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+gap:15px;
+padding:20px;
+}
+
+.card{
+background:#1e293b;
+padding:15px;
+border-radius:10px;
+}
+
+.value{
+font-size:24px;
+color:#22c55e;
+}
+
+button{
+padding:10px;
+margin:5px;
+border:none;
+border-radius:6px;
+}
+
+.start{background:#22c55e;}
+.stop{background:#ef4444;}
+.load{background:#3b82f6;}
+.capture{background:#f59e0b;}
+
+.graphs{
+display:grid;
+grid-template-columns:1fr 1fr;
+gap:15px;
+padding:10px;
+max-width:900px;
+margin:auto;
+}
+
+canvas{
+background:#111827;
+border-radius:8px;
+width:100% !important;
+height:200px !important;
+}
+
+/* TABLE */
+table{
+width:90%;
+margin:auto;
+margin-top:20px;
+border-collapse:collapse;
+background:#1e293b;
+}
+
+th{
+background:#111827;
+}
+
+td,th{
+padding:10px;
+border:1px solid #555;
+text-align:center;
+}
+</style>
+</head>
+
+<body>
+
+<h1>PC INTEGRATED INDUCTION MOTOR</h1>
+
+<div class="grid">
+<div class="card">Voltage<div id="v" class="value">0</div></div>
+<div class="card">Current<div id="c" class="value">0</div></div>
+<div class="card">Temp<div id="t" class="value">0</div></div>
+<div class="card">Load<div id="l" class="value">0</div></div>
+<div class="card">RPM<div id="rpm" class="value">0</div></div>
+</div>
+
+<h3 id="status">Motor Status : STOPPED</h3>
+
+<button class="start" onclick="fetch('/motor_on')">START</button>
+<button class="stop" onclick="fetch('/ext_off')">STOP</button>
+<br>
+<button class="load" onclick="fetch('/load_inc')">LOAD +</button>
+<button class="load" onclick="fetch('/load_dec')">LOAD -</button>
+<button class="capture" onclick="capture()">Capture Reading</button>
+
+<h2>Live Graphs</h2>
+<div class="graphs">
+<canvas id="vi"></canvas>
+<canvas id="cl"></canvas>
+<canvas id="rpmg"></canvas>
+</div>
+
+<h2>Experiment Graphs</h2>
+<div class="graphs">
+<canvas id="evi"></canvas>
+<canvas id="ecl"></canvas>
+<canvas id="etc"></canvas>
+<canvas id="erpm"></canvas>
+</div>
+
+<h2>Readings Table</h2>
+<table>
+<tr><th>#</th><th>Load</th><th>V</th><th>I</th><th>T</th><th>RPM</th></tr>
+<tr><td>1</td><td id="l1">-</td><td id="v1">-</td><td id="c1">-</td><td id="t1">-</td><td id="r1">-</td></tr>
+<tr><td>2</td><td id="l2">-</td><td id="v2">-</td><td id="c2">-</td><td id="t2">-</td><td id="r2">-</td></tr>
+<tr><td>3</td><td id="l3">-</td><td id="v3">-</td><td id="c3">-</td><td id="t3">-</td><td id="r3">-</td></tr>
+<tr><td>4</td><td id="l4">-</td><td id="v4">-</td><td id="c4">-</td><td id="t4">-</td><td id="r4">-</td></tr>
+<tr><td>5</td><td id="l5">-</td><td id="v5">-</td><td id="c5">-</td><td id="t5">-</td><td id="r5">-</td></tr>
+</table>
+
+<script>
+
+let vi,cl,rpmg,evi,ecl,etc,erpm;
+
+let V=[],I=[],L=[],T=[],R=[];
+let idx=1;
+
+window.onload=function(){
+
+vi=new Chart(document.getElementById('vi'),{type:'line',data:{labels:[],datasets:[{label:'Current',data:[],borderColor:'#22c55e'}]}})
+cl=new Chart(document.getElementById('cl'),{type:'line',data:{labels:[],datasets:[{label:'Current',data:[],borderColor:'#3b82f6'}]}})
+rpmg=new Chart(document.getElementById('rpmg'),{type:'line',data:{labels:[],datasets:[{label:'RPM',data:[],borderColor:'#f59e0b'}]}})
+
+evi=new Chart(document.getElementById('evi'),{type:'line',data:{labels:[],datasets:[{label:'Current',data:[],borderColor:'#22c55e'}]}})
+ecl=new Chart(document.getElementById('ecl'),{type:'line',data:{labels:[],datasets:[{label:'Current',data:[],borderColor:'#3b82f6'}]}})
+etc=new Chart(document.getElementById('etc'),{type:'line',data:{labels:[],datasets:[{label:'Temp',data:[],borderColor:'#ff9800'}]}})
+erpm=new Chart(document.getElementById('erpm'),{type:'line',data:{labels:[],datasets:[{label:'RPM',data:[],borderColor:'#ff00ff'}]}})
+
+setInterval(update,2000);
+}
+
+function update(){
+
+fetch('/data')
+.then(r=>r.json())
+.then(d=>{
+
+// store
+V.push(d.voltage);
+I.push(d.current);
+L.push(d.load);
+T.push(d.temp);
+R.push(d.rpm);
+
+// display
+document.getElementById("v").innerHTML=d.voltage.toFixed(1);
+document.getElementById("c").innerHTML=d.current.toFixed(2);
+document.getElementById("t").innerHTML=d.temp.toFixed(1);
+document.getElementById("l").innerHTML=d.load.toFixed(2);
+document.getElementById("rpm").innerHTML=d.rpm.toFixed(0);
+document.getElementById("status").innerHTML="Motor : "+d.motor;
+
+// limit
+if(vi.data.labels.length>20){
+vi.data.labels.shift(); vi.data.datasets[0].data.shift();
+cl.data.labels.shift(); cl.data.datasets[0].data.shift();
+rpmg.data.labels.shift(); rpmg.data.datasets[0].data.shift();
+}
+
+// live graphs
+vi.data.labels.push(d.voltage);
+vi.data.datasets[0].data.push(d.current);
+
+cl.data.labels.push(d.load);
+cl.data.datasets[0].data.push(d.current);
+
+rpmg.data.labels.push(rpmg.data.labels.length);
+rpmg.data.datasets[0].data.push(d.rpm);
+
+vi.update(); cl.update(); rpmg.update();
+
+});
+}
+
+function capture(){
+
+if(idx>5) return;
+
+document.getElementById("l"+idx).innerHTML=L[L.length-1].toFixed(2);
+document.getElementById("v"+idx).innerHTML=V[V.length-1].toFixed(1);
+document.getElementById("c"+idx).innerHTML=I[I.length-1].toFixed(2);
+document.getElementById("t"+idx).innerHTML=T[T.length-1].toFixed(1);
+document.getElementById("r"+idx).innerHTML=R[R.length-1].toFixed(0);
+
+// experiment graphs
+evi.data.labels=V; evi.data.datasets[0].data=I;
+ecl.data.labels=L; ecl.data.datasets[0].data=I;
+etc.data.labels=I; etc.data.datasets[0].data=T;
+erpm.data.labels=L; erpm.data.datasets[0].data=R;
+
+evi.update(); ecl.update(); etc.update(); erpm.update();
+
+idx++;
+}
+
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// ================= HANDLERS =================
+void handleRoot(){ server.send(200,"text/html",webpage); }
+
+void handleData(){
+String json="{";
+json+="\"voltage\":"+String(V)+",";
+json+="\"current\":"+String(I)+",";
+json+="\"temp\":"+String(T)+",";
+json+="\"load\":"+String(loadValue)+",";
+json+="\"rpm\":"+String(rpm)+",";
+json+="\"motor\":\""+motor_stat+"\"}";
+server.send(200,"application/json",json);
+}
+
+// ================= SETUP =================
+void setup(){
+
+Serial.begin(9600);
+
+LoadCell.begin();
+LoadCell.start(2000);
+LoadCell.setCalFactor(999.0);
+
+pinMode(mot_rly,OUTPUT);
+pinMode(mot_A,OUTPUT);
+pinMode(mot_B,OUTPUT);
+
+pinMode(RPM_PIN,INPUT_PULLUP);
+attachInterrupt(digitalPinToInterrupt(RPM_PIN),countPulse,RISING);
+
+WiFi.softAP(ssid,password);
+
+server.on("/",handleRoot);
+server.on("/data",handleData);
+
+server.on("/motor_on",[](){digitalWrite(mot_rly,HIGH);motor_stat="RUNNING";server.send(200,"text","OK");});
+server.on("/ext_off",[](){digitalWrite(mot_rly,LOW);motor_stat="STOPPED";server.send(200,"text","OK");});
+
+server.on("/load_inc",[](){
+for(int i=0;i<7;i++){
+digitalWrite(mot_A,LOW);digitalWrite(mot_B,HIGH);
+delay(1000);
+digitalWrite(mot_A,LOW);digitalWrite(mot_B,LOW);
+delay(200);
+}
+server.send(200,"text","OK");
+});
+
+server.on("/load_dec",[](){
+for(int i=0;i<7;i++){
+digitalWrite(mot_A,HIGH);digitalWrite(mot_B,LOW);
+delay(1000);
+digitalWrite(mot_A,LOW);digitalWrite(mot_B,LOW);
+delay(200);
+}
+server.send(200,"text","OK");
+});
+
+server.begin();
+}
+
+// ================= LOOP =================
+void loop(){
+
+server.handleClient();
+
+LoadCell.update();
+loadValue=LoadCell.getData();
+
+// RPM
+if(millis()-lastRPMTime>=1000){
+rpm=pulseCount*60;
+pulseCount=0;
+lastRPMTime=millis();
+}
+
+// SERIAL
+if(Serial.available()){
+data_in=Serial.readStringUntil('\n');
+
+if(data_in.startsWith("#")){
+int p1=data_in.indexOf(',');
+int p2=data_in.indexOf(',',p1+1);
+
+I=data_in.substring(1,p1).toFloat();
+V=data_in.substring(p1+1,p2).toFloat();
+T=data_in.substring(p2+1).toFloat();
+}
+}
+
+}
