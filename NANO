@@ -1,0 +1,48 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define line_temp         A1
+#define line_volt         A2
+#define line_current      A3
+
+float temp_read, current_read, volt_read;
+
+void setup() 
+{
+  Serial.begin(9600);  // Communication with ESP8266
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0); lcd.print("  PC Integrated   ");
+  lcd.setCursor(0, 1); lcd.print("   --- LAB ---    ");
+  delay(2000);
+  lcd.setCursor(0, 1); lcd.print("C:00.00 V:000.00 ");
+  lcd.setCursor(0, 0); lcd.print("T:000.00         ");
+  delay(2000);
+}
+
+void loop() 
+{
+   // --- Read temperature ---
+   temp_read = analogRead(line_temp);
+   temp_read = (temp_read / 15);
+
+   if(temp_read < 10){ lcd.setCursor(6, 0); lcd.print("  "); }
+   if(temp_read < 100){ lcd.setCursor(7, 0); lcd.print(" "); }
+   lcd.setCursor(2, 0); lcd.print(temp_read);
+   
+   // --- Read current and voltage ---
+   current_read = analogRead(line_current);
+   volt_read = analogRead(line_volt);
+
+   // --- Send data to ESP8266 via Serial ---
+   // Format: TEMP,CURRENT,VOLT\n
+   Serial.print(temp_read);
+   Serial.print(",");
+   Serial.print(current_read);
+   Serial.print(",");
+   Serial.println(volt_read);
+
+   delay(500);
+}
